@@ -7,7 +7,7 @@ import database as db
 import utils
 
 # --- CONFIG & INIT ---
-st.set_page_config(page_title="Resep App", layout="wide")
+st.set_page_config(page_title="Manajemen Resep App", layout="wide")
 
 # Init DB saat pertama kali load
 if 'db_initialized' not in st.session_state:
@@ -400,3 +400,4 @@ def page_manage_users():
 
 if __name__ == '__main__':
     main()
+
