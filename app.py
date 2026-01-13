@@ -13,8 +13,41 @@ if 'db_initialized' not in st.session_state:
     db.init_db()
     st.session_state['db_initialized'] = True
 
-# --- MAIN ROUTER (Navigasi Persisten) ---
+# --- FUNGSI INISIALISASI SESI (PERBAIKAN UTAMA) ---
+def init_session():
+    # 1. Pastikan variabel default ada dulu (Mencegah KeyError)
+    if 'logged_in' not in st.session_state:
+        st.session_state['logged_in'] = False
+    if 'role' not in st.session_state:
+        st.session_state['role'] = None
+    if 'username' not in st.session_state:
+        st.session_state['username'] = None
+    if 'menu_list' not in st.session_state:
+        st.session_state['menu_list'] = []
+
+    # 2. Logika Auto-Login dari URL (Agar tahan refresh)
+    # Hanya jalankan jika belum login tapi ada 'user' di URL
+    if not st.session_state['logged_in'] and 'user' in st.query_params:
+        username_url = st.query_params['user']
+        # Cek ke database
+        try:
+            user_data = db.get_user_by_username(username_url)
+            if user_data:
+                st.session_state['logged_in'] = True
+                st.session_state['username'] = user_data[0]
+                st.session_state['role'] = user_data[2]
+            else:
+                # Jika user di URL tidak valid/dihapus, bersihkan URL
+                st.query_params.clear()
+        except Exception:
+            pass
+
+# --- MAIN ROUTER ---
 def main():
+    # PANGGIL FUNGSI INI PALING AWAL
+    init_session()
+    
+    # Sekarang aman untuk mengecek 'logged_in'
     if not st.session_state['logged_in']:
         page_login()
     else:
@@ -103,12 +136,11 @@ def page_calculator():
                 for i in st.session_state.menu_list:
                     with st.expander(f"{i['name']} ({i['portions']} Porsi)"):
                         link = i['link']
-                        # PERBAIKAN DI SINI (Deteksi YouTube)
                         if link and len(link) > 5:
                             if "youtube.com" in link or "youtu.be" in link:
-                                st.video(link) # Tampil Video Player
+                                st.video(link) 
                             else:
-                                st.link_button("Buka Artikel Resep", link) # Tombol biasa
+                                st.link_button("Buka Artikel Resep", link)
                         else:
                             st.caption("Tidak ada link.")
         
@@ -155,7 +187,6 @@ def page_calculator():
                             det['Jml'] = det.apply(lambda x: utils.format_indo(x['quantity']), axis=1)
                             st.table(det[['ingredient_name', 'Jml', 'unit']])
                             
-                            # PERBAIKAN DI SINI JUGA
                             link = m['source_link']
                             if link and len(link) > 5:
                                 st.write("---")
