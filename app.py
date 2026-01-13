@@ -13,31 +13,43 @@ if 'db_initialized' not in st.session_state:
     db.init_db()
     st.session_state['db_initialized'] = True
 
-# --- FUNGSI BANTUAN SESI (Auto Login saat Refresh) ---
-def init_session():
-    # 1. Cek apakah di URL ada parameter 'user'
-    if 'user' in st.query_params:
-        username_url = st.query_params['user']
-        # Validasi apakah user tersebut ada di database
-        user_data = db.get_user_by_username(username_url)
+# --- MAIN ROUTER (Navigasi Persisten) ---
+def main():
+    if not st.session_state['logged_in']:
+        page_login()
+    else:
+        st.sidebar.title(f"Halo, {st.session_state['username']}")
         
-        if user_data:
-            # Jika ada, restore session
-            st.session_state['logged_in'] = True
-            st.session_state['username'] = user_data[0]
-            st.session_state['role'] = user_data[2]
-        else:
-            # Jika user di URL ngawur, bersihkan
+        if st.sidebar.button("Logout"):
+            st.session_state['logged_in'] = False
+            st.session_state['role'] = None
+            st.session_state['menu_list'] = []
             st.query_params.clear()
-
-    # 2. Inisialisasi default jika belum login
-    if 'logged_in' not in st.session_state:
-        st.session_state['logged_in'] = False
-        st.session_state['role'] = None
-        st.session_state['username'] = None
-
-# Panggil fungsi ini paling awal
-init_session()
+            st.rerun()
+            
+        st.sidebar.divider()
+        
+        if st.session_state['role'] == 'admin':
+            options = ["Kalkulator", "Resep", "User"]
+            default_index = 0
+            if "page" in st.query_params:
+                current_page_param = st.query_params["page"]
+                if current_page_param in options:
+                    default_index = options.index(current_page_param)
+            
+            selected_menu = st.sidebar.radio("Menu", options, index=default_index)
+            
+            if st.query_params.get("page") != selected_menu:
+                st.query_params["page"] = selected_menu
+            
+            if selected_menu == "Kalkulator": page_calculator()
+            elif selected_menu == "Resep": page_manage_recipes()
+            elif selected_menu == "User": page_manage_users()
+            
+        else:
+            if st.query_params.get("page") != "Kalkulator":
+                st.query_params["page"] = "Kalkulator"
+            page_calculator()
 
 # --- HALAMAN-HALAMAN (VIEWS) ---
 
@@ -50,14 +62,10 @@ def page_login():
         if st.button("Login"):
             user = db.login_user(u, p)
             if user:
-                # Set Session State (RAM)
                 st.session_state['logged_in'] = True
                 st.session_state['username'] = user[0]
                 st.session_state['role'] = user[2]
-                
-                # Set URL Parameter (Browser) agar tahan refresh
-                st.query_params['user'] = user[0]
-                
+                st.query_params['user'] = user[0] # Simpan sesi di URL
                 st.rerun()
             else:
                 st.error("Gagal Login")
@@ -66,6 +74,7 @@ def page_calculator():
     st.title("🍳 Aplikasi Masak Cerdas")
     tab1, tab2 = st.tabs(["🛒 Hitung Belanja", "🔍 Cari Resep dari Stok"])
     
+    # --- TAB 1: KALKULATOR ---
     with tab1:
         if 'menu_list' not in st.session_state: st.session_state.menu_list = []
         
@@ -90,9 +99,18 @@ def page_calculator():
             if st.session_state.menu_list:
                 if st.button("Reset"): st.session_state.menu_list = []; st.rerun()
                 st.divider()
+                st.write("📖 **Panduan Masak:**")
                 for i in st.session_state.menu_list:
                     with st.expander(f"{i['name']} ({i['portions']} Porsi)"):
-                        if i['link'] and len(i['link'])>5: st.link_button("Sumber", i['link'])
+                        link = i['link']
+                        # PERBAIKAN DI SINI (Deteksi YouTube)
+                        if link and len(link) > 5:
+                            if "youtube.com" in link or "youtu.be" in link:
+                                st.video(link) # Tampil Video Player
+                            else:
+                                st.link_button("Buka Artikel Resep", link) # Tombol biasa
+                        else:
+                            st.caption("Tidak ada link.")
         
         with c2:
             if st.session_state.menu_list:
@@ -118,6 +136,7 @@ def page_calculator():
                     st.dataframe(edited[['ingredient_name', 'Estimasi']], use_container_width=True)
                     st.download_button("Download Excel", utils.generate_excel(edited), "Belanja.xlsx")
 
+    # --- TAB 2: CARI RESEP ---
     with tab2:
         st.subheader("Cari Resep by Stok")
         all_ings = db.get_all_unique_ingredients()
@@ -136,7 +155,14 @@ def page_calculator():
                             det['Jml'] = det.apply(lambda x: utils.format_indo(x['quantity']), axis=1)
                             st.table(det[['ingredient_name', 'Jml', 'unit']])
                             
-                            if m['source_link'] and len(m['source_link'])>5: st.link_button("Lihat Sumber", m['source_link'])
+                            # PERBAIKAN DI SINI JUGA
+                            link = m['source_link']
+                            if link and len(link) > 5:
+                                st.write("---")
+                                if "youtube.com" in link or "youtu.be" in link:
+                                    st.video(link)
+                                else:
+                                    st.link_button("Lihat Sumber Resep", link)
                 else: st.warning("Tidak ada yang cocok.")
 
 def page_manage_recipes():
@@ -203,56 +229,6 @@ def page_manage_users():
         if st.button("Hapus User", type="primary"): 
             if us != st.session_state['username']: db.delete_user_data(us); st.rerun()
             else: st.error("Gabisa hapus diri sendiri")
-
-# --- MAIN ROUTER (Update untuk Navigasi Persisten) ---
-
-def main():
-    if not st.session_state['logged_in']:
-        page_login()
-    else:
-        st.sidebar.title(f"Halo, {st.session_state['username']}")
-        
-        # Tombol Logout
-        if st.sidebar.button("Logout"):
-            st.session_state['logged_in'] = False
-            st.session_state['role'] = None
-            st.session_state['menu_list'] = []
-            st.query_params.clear() # Bersihkan semua parameter URL
-            st.rerun()
-            
-        st.sidebar.divider()
-        
-        # Logika Navigasi Admin
-        if st.session_state['role'] == 'admin':
-            options = ["Kalkulator", "Resep", "User"]
-            
-            # 1. Cek URL: Apakah ada parameter 'page'?
-            # Jika ada dan valid, jadikan itu sebagai default index
-            default_index = 0
-            if "page" in st.query_params:
-                current_page_param = st.query_params["page"]
-                if current_page_param in options:
-                    default_index = options.index(current_page_param)
-            
-            # 2. Tampilkan Menu dengan index yang sesuai
-            selected_menu = st.sidebar.radio("Menu", options, index=default_index)
-            
-            # 3. Update URL jika menu berubah
-            # Ini agar saat refresh nanti, browser tahu posisi terakhir kita
-            if st.query_params.get("page") != selected_menu:
-                st.query_params["page"] = selected_menu
-            
-            # 4. Routing Halaman
-            if selected_menu == "Kalkulator": page_calculator()
-            elif selected_menu == "Resep": page_manage_recipes()
-            elif selected_menu == "User": page_manage_users()
-            
-        else:
-            # User biasa (Hanya 1 halaman)
-            # Kita set page=Kalkulator di URL agar rapi
-            if st.query_params.get("page") != "Kalkulator":
-                st.query_params["page"] = "Kalkulator"
-            page_calculator()
 
 if __name__ == '__main__':
     main()
