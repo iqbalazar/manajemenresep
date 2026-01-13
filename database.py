@@ -82,7 +82,14 @@ def login_user(username, password):
     conn.close()
     if data and check_hashes(password, data[1]): return data
     return None
-
+# --- TAMBAHKAN INI DI FILE database.py (Di bawah fungsi login_user) ---
+def get_user_by_username(username):
+    conn = init_connection()
+    c = conn.cursor()
+    c.execute('SELECT * FROM users WHERE username = %s', (username,))
+    data = c.fetchone()
+    conn.close()
+    return data
 def create_user(u, p, r): return run_query("INSERT INTO users VALUES (%s, %s, %s)", (u, make_hashes(p), r))
 def update_user(u, p, r):
     if p: run_query("UPDATE users SET password=%s, role=%s WHERE username=%s", (make_hashes(p), r, u))
