@@ -204,7 +204,7 @@ def page_manage_users():
             if us != st.session_state['username']: db.delete_user_data(us); st.rerun()
             else: st.error("Gabisa hapus diri sendiri")
 
-# --- MAIN ROUTER ---
+# --- MAIN ROUTER (Update untuk Navigasi Persisten) ---
 
 def main():
     if not st.session_state['logged_in']:
@@ -214,25 +214,44 @@ def main():
         
         # Tombol Logout
         if st.sidebar.button("Logout"):
-            # Bersihkan session RAM
             st.session_state['logged_in'] = False
             st.session_state['role'] = None
             st.session_state['menu_list'] = []
-            
-            # Bersihkan URL
-            st.query_params.clear()
-            
+            st.query_params.clear() # Bersihkan semua parameter URL
             st.rerun()
             
         st.sidebar.divider()
         
-        # Router Halaman
+        # Logika Navigasi Admin
         if st.session_state['role'] == 'admin':
-            menu = st.sidebar.radio("Menu", ["Kalkulator", "Resep", "User"])
-            if menu == "Kalkulator": page_calculator()
-            elif menu == "Resep": page_manage_recipes()
-            elif menu == "User": page_manage_users()
+            options = ["Kalkulator", "Resep", "User"]
+            
+            # 1. Cek URL: Apakah ada parameter 'page'?
+            # Jika ada dan valid, jadikan itu sebagai default index
+            default_index = 0
+            if "page" in st.query_params:
+                current_page_param = st.query_params["page"]
+                if current_page_param in options:
+                    default_index = options.index(current_page_param)
+            
+            # 2. Tampilkan Menu dengan index yang sesuai
+            selected_menu = st.sidebar.radio("Menu", options, index=default_index)
+            
+            # 3. Update URL jika menu berubah
+            # Ini agar saat refresh nanti, browser tahu posisi terakhir kita
+            if st.query_params.get("page") != selected_menu:
+                st.query_params["page"] = selected_menu
+            
+            # 4. Routing Halaman
+            if selected_menu == "Kalkulator": page_calculator()
+            elif selected_menu == "Resep": page_manage_recipes()
+            elif selected_menu == "User": page_manage_users()
+            
         else:
+            # User biasa (Hanya 1 halaman)
+            # Kita set page=Kalkulator di URL agar rapi
+            if st.query_params.get("page") != "Kalkulator":
+                st.query_params["page"] = "Kalkulator"
             page_calculator()
 
 if __name__ == '__main__':
