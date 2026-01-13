@@ -13,11 +13,31 @@ if 'db_initialized' not in st.session_state:
     db.init_db()
     st.session_state['db_initialized'] = True
 
-# Init Session State Login
-if 'logged_in' not in st.session_state:
-    st.session_state['logged_in'] = False
-    st.session_state['role'] = None
-    st.session_state['username'] = None
+# --- FUNGSI BANTUAN SESI (Auto Login saat Refresh) ---
+def init_session():
+    # 1. Cek apakah di URL ada parameter 'user'
+    if 'user' in st.query_params:
+        username_url = st.query_params['user']
+        # Validasi apakah user tersebut ada di database
+        user_data = db.get_user_by_username(username_url)
+        
+        if user_data:
+            # Jika ada, restore session
+            st.session_state['logged_in'] = True
+            st.session_state['username'] = user_data[0]
+            st.session_state['role'] = user_data[2]
+        else:
+            # Jika user di URL ngawur, bersihkan
+            st.query_params.clear()
+
+    # 2. Inisialisasi default jika belum login
+    if 'logged_in' not in st.session_state:
+        st.session_state['logged_in'] = False
+        st.session_state['role'] = None
+        st.session_state['username'] = None
+
+# Panggil fungsi ini paling awal
+init_session()
 
 # --- HALAMAN-HALAMAN (VIEWS) ---
 
@@ -30,9 +50,14 @@ def page_login():
         if st.button("Login"):
             user = db.login_user(u, p)
             if user:
+                # Set Session State (RAM)
                 st.session_state['logged_in'] = True
                 st.session_state['username'] = user[0]
                 st.session_state['role'] = user[2]
+                
+                # Set URL Parameter (Browser) agar tahan refresh
+                st.query_params['user'] = user[0]
+                
                 st.rerun()
             else:
                 st.error("Gagal Login")
@@ -182,18 +207,23 @@ def page_manage_users():
 # --- MAIN ROUTER ---
 
 def main():
-    # Logika Navigasi agar tidak reset ke Login saat refresh
-    # Selama 'logged_in' di session state True, dia akan merender sidebar
-    
     if not st.session_state['logged_in']:
         page_login()
     else:
-        # Sidebar
         st.sidebar.title(f"Halo, {st.session_state['username']}")
+        
+        # Tombol Logout
         if st.sidebar.button("Logout"):
+            # Bersihkan session RAM
             st.session_state['logged_in'] = False
             st.session_state['role'] = None
+            st.session_state['menu_list'] = []
+            
+            # Bersihkan URL
+            st.query_params.clear()
+            
             st.rerun()
+            
         st.sidebar.divider()
         
         # Router Halaman
