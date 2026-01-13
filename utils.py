@@ -34,7 +34,11 @@ def format_output(val, unit):
 def generate_excel(df):
     output = BytesIO()
     writer = pd.ExcelWriter(output, engine='xlsxwriter')
-    save_df = df[['ingredient_name', 'Estimasi Belanja']].rename(columns={'Estimasi Belanja': 'Harus Dibeli'})
+    
+    # PERBAIKAN DI SINI:
+    # Mengubah 'Estimasi Belanja' menjadi 'Estimasi' agar cocok dengan app.py
+    save_df = df[['ingredient_name', 'Estimasi']].rename(columns={'Estimasi': 'Harus Dibeli'})
+    
     save_df.to_excel(writer, index=False, sheet_name='Belanja')
     
     wb = writer.book; ws = writer.sheets['Belanja']
