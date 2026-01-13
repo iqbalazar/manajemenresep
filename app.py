@@ -1,10 +1,14 @@
 import streamlit as st
-import sqlite3
 import pandas as pd
 import hashlib
+import psycopg2
 from io import BytesIO
 
-# --- 1. Database & Security Functions ---
+# --- 1. Database Connection & Security ---
+
+def init_connection():
+    # Mengambil rahasia koneksi dari st.secrets
+    return psycopg2.connect(st.secrets["DATABASE_URL"])
 
 def make_hashes(password):
     return hashlib.sha256(str.encode(password)).hexdigest()
@@ -15,84 +19,115 @@ def check_hashes(password, hashed_text):
     return False
 
 def init_db():
-    conn = sqlite3.connect('resep_masakan.db')
-    c = conn.cursor()
-    
-    c.execute('''CREATE TABLE IF NOT EXISTS recipes 
-                 (id INTEGER PRIMARY KEY, name TEXT)''')
-    
-    c.execute("PRAGMA table_info(recipes)")
-    columns = [info[1] for info in c.fetchall()]
-    if 'source_link' not in columns:
-        c.execute("ALTER TABLE recipes ADD COLUMN source_link TEXT")
-        conn.commit()
-    
-    c.execute('''CREATE TABLE IF NOT EXISTS ingredients 
-                 (id INTEGER PRIMARY KEY, recipe_id INTEGER, 
-                  ingredient_name TEXT, quantity REAL, unit TEXT,
-                  FOREIGN KEY(recipe_id) REFERENCES recipes(id))''')
-    
-    c.execute('''CREATE TABLE IF NOT EXISTS users 
-                 (username TEXT PRIMARY KEY, password TEXT, role TEXT)''')
-    
-    c.execute('SELECT count(*) FROM users')
-    if c.fetchone()[0] == 0:
-        # Default user tetap dibuat di database, tapi tidak ditampilkan infonya di layar login
-        c.execute("INSERT INTO users VALUES (?,?,?)", ('admin', make_hashes('admin123'), 'admin'))
-        c.execute("INSERT INTO users VALUES (?,?,?)", ('user', make_hashes('user123'), 'user'))
+    try:
+        conn = init_connection()
+        c = conn.cursor()
         
-        c.execute("INSERT INTO recipes (name, source_link) VALUES (?, ?)", 
-                  ('Nasi Goreng Spesial', 'https://www.youtube.com/watch?v=kY4tWz5vWwc'))
-        ns_id = c.lastrowid
-        c.executemany("INSERT INTO ingredients (recipe_id, ingredient_name, quantity, unit) VALUES (?, ?, ?, ?)",
-                      [(ns_id, 'Nasi Putih', 200, 'gram'),
-                       (ns_id, 'Telur', 1, 'butir'),
-                       (ns_id, 'Kecap Manis', 10, 'ml'),
-                       (ns_id, 'Bawang Merah', 3, 'siung')])
+        # Tabel Resep (PostgreSQL syntax: SERIAL untuk auto increment)
+        c.execute('''CREATE TABLE IF NOT EXISTS recipes 
+                     (id SERIAL PRIMARY KEY, 
+                      name TEXT, 
+                      source_link TEXT)''')
+        
+        # Tabel Bahan
+        c.execute('''CREATE TABLE IF NOT EXISTS ingredients 
+                     (id SERIAL PRIMARY KEY, 
+                      recipe_id INTEGER REFERENCES recipes(id), 
+                      ingredient_name TEXT, 
+                      quantity REAL, 
+                      unit TEXT)''')
+        
+        # Tabel User
+        c.execute('''CREATE TABLE IF NOT EXISTS users 
+                     (username TEXT PRIMARY KEY, 
+                      password TEXT, 
+                      role TEXT)''')
+        
         conn.commit()
-    conn.close()
+        
+        # Seed Data Awal (Cek apakah user admin sudah ada)
+        c.execute("SELECT count(*) FROM users")
+        if c.fetchone()[0] == 0:
+            c.execute("INSERT INTO users (username, password, role) VALUES (%s, %s, %s)", 
+                      ('admin', make_hashes('admin123'), 'admin'))
+            c.execute("INSERT INTO users (username, password, role) VALUES (%s, %s, %s)", 
+                      ('user', make_hashes('user123'), 'user'))
+            
+            # Data Dummy
+            c.execute("INSERT INTO recipes (name, source_link) VALUES (%s, %s) RETURNING id", 
+                      ('Nasi Goreng Spesial', 'https://www.youtube.com/watch?v=kY4tWz5vWwc'))
+            ns_id = c.fetchone()[0]
+            
+            # Insert bahan (Executemany di postgres agak beda, kita loop manual biar aman bagi pemula)
+            ingredients_data = [
+                (ns_id, 'Nasi Putih', 200, 'gram'),
+                (ns_id, 'Telur', 1, 'butir'),
+                (ns_id, 'Kecap Manis', 10, 'ml'),
+                (ns_id, 'Bawang Merah', 3, 'siung')
+            ]
+            for ing in ingredients_data:
+                c.execute("INSERT INTO ingredients (recipe_id, ingredient_name, quantity, unit) VALUES (%s, %s, %s, %s)", ing)
+                
+            conn.commit()
+            
+        c.close()
+        conn.close()
+    except Exception as e:
+        st.error(f"Gagal inisialisasi Database: {e}")
 
-# --- 2. Database CRUD Functions ---
+# --- 2. CRUD Functions (Updated for PostgreSQL) ---
+
+def run_query(query, params=None, fetch_data=False):
+    """Fungsi helper agar tidak berulang nulis connect/close"""
+    conn = init_connection()
+    c = conn.cursor()
+    data = None
+    try:
+        if params:
+            c.execute(query, params)
+        else:
+            c.execute(query)
+        
+        if fetch_data:
+            # Ambil nama kolom
+            colnames = [desc[0] for desc in c.description]
+            rows = c.fetchall()
+            data = pd.DataFrame(rows, columns=colnames)
+        else:
+            conn.commit()
+    except Exception as e:
+        st.error(f"Error Query: {e}")
+    finally:
+        c.close()
+        conn.close()
+    return data
 
 def create_user(username, password, role):
-    conn = sqlite3.connect('resep_masakan.db')
-    c = conn.cursor()
     try:
-        c.execute("INSERT INTO users (username, password, role) VALUES (?,?,?)", (username, make_hashes(password), role))
-        conn.commit()
+        run_query("INSERT INTO users (username, password, role) VALUES (%s, %s, %s)", 
+                  (username, make_hashes(password), role))
         return True
-    except sqlite3.IntegrityError:
+    except:
         return False
-    finally:
-        conn.close()
 
 def update_user(username, new_password, new_role):
-    conn = sqlite3.connect('resep_masakan.db')
-    c = conn.cursor()
     if new_password:
-        c.execute("UPDATE users SET password=?, role=? WHERE username=?", (make_hashes(new_password), new_role, username))
+        run_query("UPDATE users SET password=%s, role=%s WHERE username=%s", 
+                  (make_hashes(new_password), new_role, username))
     else:
-        c.execute("UPDATE users SET role=? WHERE username=?", (new_role, username))
-    conn.commit()
-    conn.close()
+        run_query("UPDATE users SET role=%s WHERE username=%s", 
+                  (new_role, username))
 
 def delete_user_data(username):
-    conn = sqlite3.connect('resep_masakan.db')
-    c = conn.cursor()
-    c.execute("DELETE FROM users WHERE username=?", (username,))
-    conn.commit()
-    conn.close()
+    run_query("DELETE FROM users WHERE username=%s", (username,))
 
 def get_all_users():
-    conn = sqlite3.connect('resep_masakan.db')
-    df = pd.read_sql("SELECT username, role FROM users", conn)
-    conn.close()
-    return df
+    return run_query("SELECT username, role FROM users", fetch_data=True)
 
 def login_user(username, password):
-    conn = sqlite3.connect('resep_masakan.db')
+    conn = init_connection()
     c = conn.cursor()
-    c.execute('SELECT * FROM users WHERE username = ?', (username,))
+    c.execute('SELECT * FROM users WHERE username = %s', (username,))
     data = c.fetchone()
     conn.close()
     if data:
@@ -101,100 +136,71 @@ def login_user(username, password):
     return None
 
 def add_recipe_to_db(name, link):
-    conn = sqlite3.connect('resep_masakan.db')
-    c = conn.cursor()
-    c.execute("INSERT INTO recipes (name, source_link) VALUES (?, ?)", (name, link))
-    conn.commit()
-    conn.close()
+    run_query("INSERT INTO recipes (name, source_link) VALUES (%s, %s)", (name, link))
 
 def update_recipe_data(id, new_name, new_link):
-    conn = sqlite3.connect('resep_masakan.db')
-    c = conn.cursor()
-    c.execute("UPDATE recipes SET name=?, source_link=? WHERE id=?", (new_name, new_link, id))
-    conn.commit()
-    conn.close()
+    run_query("UPDATE recipes SET name=%s, source_link=%s WHERE id=%s", (new_name, new_link, id))
 
 def delete_recipe_from_db(recipe_id):
-    conn = sqlite3.connect('resep_masakan.db')
-    c = conn.cursor()
-    c.execute("DELETE FROM ingredients WHERE recipe_id=?", (recipe_id,))
-    c.execute("DELETE FROM recipes WHERE id=?", (recipe_id,))
-    conn.commit()
-    conn.close()
+    run_query("DELETE FROM ingredients WHERE recipe_id=%s", (recipe_id,))
+    run_query("DELETE FROM recipes WHERE id=%s", (recipe_id,))
 
 def get_all_recipes():
-    conn = sqlite3.connect('resep_masakan.db')
-    df = pd.read_sql("SELECT * FROM recipes", conn)
-    conn.close()
-    return df
+    return run_query("SELECT * FROM recipes ORDER BY id", fetch_data=True)
 
 def add_ingredient_to_db(recipe_id, name, qty, unit):
-    conn = sqlite3.connect('resep_masakan.db')
-    c = conn.cursor()
-    c.execute("INSERT INTO ingredients (recipe_id, ingredient_name, quantity, unit) VALUES (?, ?, ?, ?)", (recipe_id, name, qty, unit))
-    conn.commit()
-    conn.close()
+    run_query("INSERT INTO ingredients (recipe_id, ingredient_name, quantity, unit) VALUES (%s, %s, %s, %s)", 
+              (recipe_id, name, qty, unit))
 
 def update_ingredient_data(ing_id, name, qty, unit):
-    conn = sqlite3.connect('resep_masakan.db')
-    c = conn.cursor()
-    c.execute("UPDATE ingredients SET ingredient_name=?, quantity=?, unit=? WHERE id=?", (name, qty, unit, ing_id))
-    conn.commit()
-    conn.close()
+    run_query("UPDATE ingredients SET ingredient_name=%s, quantity=%s, unit=%s WHERE id=%s", 
+              (name, qty, unit, ing_id))
 
 def delete_ingredient_data(ing_id):
-    conn = sqlite3.connect('resep_masakan.db')
-    c = conn.cursor()
-    c.execute("DELETE FROM ingredients WHERE id=?", (ing_id,))
-    conn.commit()
-    conn.close()
+    run_query("DELETE FROM ingredients WHERE id=%s", (ing_id,))
 
 def get_ingredients_by_recipe(recipe_id):
-    conn = sqlite3.connect('resep_masakan.db')
-    df = pd.read_sql("SELECT id, ingredient_name, quantity, unit FROM ingredients WHERE recipe_id = ?", conn, params=(recipe_id,))
-    conn.close()
-    return df
+    # Konversi ID ke int standar python agar tidak error di adapter postgres
+    return run_query("SELECT id, ingredient_name, quantity, unit FROM ingredients WHERE recipe_id = %s ORDER BY id", 
+                     (int(recipe_id),), fetch_data=True)
 
-# --- FUNGSI PENCARIAN & MATCHING ---
 def get_all_unique_ingredients():
-    conn = sqlite3.connect('resep_masakan.db')
-    df = pd.read_sql("SELECT DISTINCT ingredient_name FROM ingredients ORDER BY ingredient_name", conn)
-    conn.close()
-    return df['ingredient_name'].tolist()
+    df = run_query("SELECT DISTINCT ingredient_name FROM ingredients ORDER BY ingredient_name", fetch_data=True)
+    if df is not None and not df.empty:
+        return df['ingredient_name'].tolist()
+    return []
 
 def find_matching_recipes(user_ingredients):
-    conn = sqlite3.connect('resep_masakan.db')
-    recipes_df = pd.read_sql("SELECT * FROM recipes", conn)
-    all_ing_df = pd.read_sql("SELECT recipe_id, ingredient_name FROM ingredients", conn)
-    conn.close()
+    recipes_df = get_all_recipes()
+    all_ing_df = run_query("SELECT recipe_id, ingredient_name FROM ingredients", fetch_data=True)
     
     results = []
     user_ing_set = set([x.lower() for x in user_ingredients])
     
-    for index, recipe in recipes_df.iterrows():
-        recipe_ings = all_ing_df[all_ing_df['recipe_id'] == recipe['id']]['ingredient_name'].tolist()
-        recipe_ing_set = set([x.lower() for x in recipe_ings])
-        
-        if not recipe_ing_set: continue
-        
-        common = user_ing_set.intersection(recipe_ing_set)
-        missing = recipe_ing_set - user_ing_set
-        match_percentage = len(common) / len(recipe_ing_set) * 100
-        
-        if match_percentage > 0:
-            results.append({
-                'id': recipe['id'],
-                'name': recipe['name'],
-                'source_link': recipe['source_link'],
-                'match_score': match_percentage,
-                'missing_count': len(missing),
-                'missing_ingredients': list(missing)
-            })
+    if recipes_df is not None:
+        for index, recipe in recipes_df.iterrows():
+            recipe_ings = all_ing_df[all_ing_df['recipe_id'] == recipe['id']]['ingredient_name'].tolist()
+            recipe_ing_set = set([x.lower() for x in recipe_ings])
             
-    results.sort(key=lambda x: x['match_score'], reverse=True)
+            if not recipe_ing_set: continue
+            
+            common = user_ing_set.intersection(recipe_ing_set)
+            missing = recipe_ing_set - user_ing_set
+            match_percentage = len(common) / len(recipe_ing_set) * 100
+            
+            if match_percentage > 0:
+                results.append({
+                    'id': recipe['id'],
+                    'name': recipe['name'],
+                    'source_link': recipe['source_link'],
+                    'match_score': match_percentage,
+                    'missing_count': len(missing),
+                    'missing_ingredients': list(missing)
+                })
+        results.sort(key=lambda x: x['match_score'], reverse=True)
     return results
 
-# --- 3. Logic Utils & Excel ---
+# --- 3. Logic Utils & Excel (Sama seperti sebelumnya) ---
 
 def normalize_units(df):
     conversion_rules = {
@@ -265,18 +271,15 @@ def login_page():
                 st.session_state['role'] = result[2]
                 st.rerun()
             else: st.error("Gagal Login")
-        # Info credential admin default dihapus agar tampilan lebih bersih/aman
 
 def calculator_page():
     st.title("🍳 Aplikasi Masak Cerdas")
     tab_belanja, tab_resep_stok = st.tabs(["🛒 Kalkulator Belanja & Stok", "🔍 Cari Resep dari Stok"])
     
-    # --- TAB 1: KALKULATOR BELANJA ---
     with tab_belanja:
         if 'menu_list' not in st.session_state: st.session_state.menu_list = []
-
         recipes_df = get_all_recipes()
-        if recipes_df.empty: st.warning("Belum ada resep."); return
+        if recipes_df is None or recipes_df.empty: st.warning("Belum ada resep."); return
 
         r_dict = dict(zip(recipes_df['id'], recipes_df['name']))
         link_dict = dict(zip(recipes_df['id'], recipes_df['source_link']))
@@ -286,7 +289,6 @@ def calculator_page():
             st.info("Langkah 1: Pilih Menu")
             with st.form("calc"):
                 s_id = st.selectbox("Resep", list(r_dict.keys()), format_func=lambda x: r_dict[x])
-                # UPDATE: Default value diubah jadi 1
                 portions = st.number_input("Porsi", min_value=1, value=1)
                 if st.form_submit_button("Tambah Ke Daftar"):
                     st.session_state.menu_list.append({'id': s_id, 'name': r_dict[s_id], 'portions': portions, 'link': link_dict.get(s_id)})
@@ -342,60 +344,36 @@ def calculator_page():
                     st.divider()
                     st.subheader("📋 Final Daftar Belanja")
                     st.dataframe(edited_df[['ingredient_name', 'Estimasi Belanja']], use_container_width=True)
-                    
                     excel_data = generate_excel(edited_df)
                     st.download_button(label="📥 Download Excel", data=excel_data, file_name='Daftar_Belanja_Final.xlsx', mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
 
-    # --- TAB 2: CARI RESEP DARI STOK ---
     with tab_resep_stok:
         st.subheader("🔍 Punya bahan apa di kulkas?")
-        st.write("Pilih bahan yang tersedia, kami akan carikan resep yang cocok.")
-        
         all_ingredients_list = get_all_unique_ingredients()
-        
         if all_ingredients_list:
             selected_ingredients = st.multiselect("Pilih Bahan Tersedia:", all_ingredients_list)
-            
             if st.button("Cari Resep Cocok"):
                 if selected_ingredients:
                     matches = find_matching_recipes(selected_ingredients)
-                    
                     if matches:
-                        st.write(f"Ditemukan **{len(matches)}** resep yang relevan:")
-                        
+                        st.write(f"Ditemukan **{len(matches)}** resep relevan:")
                         for m in matches:
                             score = m['match_score']
                             color = "green" if score == 100 else "orange" if score >= 50 else "red"
-                            
                             with st.expander(f"🥘 {m['name']} (Kecocokan: :{color}[{score:.0f}%])"):
-                                # Bagian Atas: Info Bahan Kurang
-                                if m['missing_count'] > 0:
-                                    st.warning(f"⚠️ **Bahan yang belum anda punya:** {', '.join(m['missing_ingredients'])}")
-                                else:
-                                    st.success("✅ Anda punya semua bahan!")
-                                
+                                if m['missing_count'] > 0: st.warning(f"⚠️ Kurang: {', '.join(m['missing_ingredients'])}")
+                                else: st.success("✅ Bahan Lengkap!")
                                 st.divider()
-                                
-                                # Info Detail Bahan
-                                st.write("📝 **Rincian Bahan Resep Ini:**")
+                                st.write("📝 **Rincian Bahan:**")
                                 ing_detail = get_ingredients_by_recipe(m['id'])
                                 ing_detail['Jumlah'] = ing_detail.apply(lambda x: format_indo(x['quantity']), axis=1)
                                 st.table(ing_detail[['ingredient_name', 'Jumlah', 'unit']])
-                                
-                                # Tombol Sumber Terpisah
                                 if m['source_link'] and len(m['source_link']) > 5:
                                     st.write("---")
-                                    st.write("Panduan Memasak:")
-                                    st.link_button(f"📺 Tonton Video / Lihat Sumber Resep {m['name']}", m['source_link'])
-                                else:
-                                    st.caption("Tidak ada link sumber untuk resep ini.")
-
-                    else:
-                        st.warning("Tidak ditemukan resep yang mengandung bahan tersebut.")
-                else:
-                    st.error("Pilih minimal satu bahan.")
-        else:
-            st.warning("Database bahan masih kosong.")
+                                    st.link_button(f"📺 Tonton / Lihat Sumber {m['name']}", m['source_link'])
+                    else: st.warning("Tidak ditemukan.")
+                else: st.error("Pilih minimal satu.")
+        else: st.warning("Database kosong.")
 
 def manage_recipes_page():
     st.title("🍽️ Kelola Resep")
@@ -413,7 +391,7 @@ def manage_recipes_page():
 
     with tab2:
         recipes_df = get_all_recipes()
-        if not recipes_df.empty:
+        if recipes_df is not None and not recipes_df.empty:
             r_dict = dict(zip(recipes_df['id'], recipes_df['name']))
             col_sel, col_act = st.columns([2,1])
             with col_sel:
@@ -424,14 +402,14 @@ def manage_recipes_page():
                 with st.form("edit_recipe_info"):
                     new_n = st.text_input("Nama Resep", value=curr_data['name'])
                     new_l = st.text_input("Link Sumber", value=curr_data['source_link'] if curr_data['source_link'] else "")
-                    if st.form_submit_button("Update Info Resep"):
+                    if st.form_submit_button("Update Info"):
                         update_recipe_data(sid, new_n, new_l)
-                        st.success("Info resep diperbarui!"); st.rerun()
+                        st.success("Updated!"); st.rerun()
 
             st.divider()
             st.subheader("Daftar Bahan")
             curr_ing = get_ingredients_by_recipe(sid)
-            if not curr_ing.empty:
+            if curr_ing is not None and not curr_ing.empty:
                 display_ing = curr_ing.copy()
                 display_ing['formatted_qty'] = display_ing.apply(lambda x: format_indo(x['quantity']), axis=1)
                 st.table(display_ing[['ingredient_name', 'formatted_qty', 'unit']])
@@ -449,13 +427,12 @@ def manage_recipes_page():
                     with col_update:
                         if st.button("Update Bahan"):
                             update_ingredient_data(selected_ing_id, e_name, e_qty, e_unit)
-                            st.success("Bahan diupdate!"); st.rerun()
+                            st.success("Updated!"); st.rerun()
                     with col_delete:
                         if st.button("Hapus Bahan Ini", type="primary"):
                             delete_ingredient_data(selected_ing_id)
-                            st.warning("Bahan dihapus."); st.rerun()
-            else:
-                st.info("Belum ada bahan.")
+                            st.warning("Deleted."); st.rerun()
+            else: st.info("Belum ada bahan.")
 
             st.divider()
             st.write("**Tambah Bahan Baru ke Resep Ini:**")
@@ -470,7 +447,7 @@ def manage_recipes_page():
 
     with tab3:
         recipes_df = get_all_recipes()
-        if not recipes_df.empty:
+        if recipes_df is not None and not recipes_df.empty:
             d = dict(zip(recipes_df['id'], recipes_df['name']))
             did = st.selectbox("Hapus Resep", list(d.keys()), format_func=lambda x: d[x], key='del_res')
             if st.button("Hapus Permanen", type='primary'):
@@ -491,27 +468,30 @@ def manage_users_page():
     st.subheader("Daftar & Edit User")
     udf = get_all_users()
     col_list, col_edit = st.columns([1, 1])
-    with col_list: st.dataframe(udf, use_container_width=True)
+    with col_list: 
+        if udf is not None: st.dataframe(udf, use_container_width=True)
     with col_edit:
         st.write("🔧 **Edit User / Reset Password**")
-        target_user = st.selectbox("Pilih User", udf['username'])
-        with st.form("edit_user"):
-            new_pass = st.text_input("Password Baru (Biarkan kosong jika tetap)", type='password')
-            current_role = udf[udf['username'] == target_user]['role'].values[0]
-            new_role = st.selectbox("Role", ["user", "admin"], index=0 if current_role == 'user' else 1)
-            if st.form_submit_button("Update User"):
-                update_user(target_user, new_pass, new_role)
-                st.success(f"User {target_user} diperbarui."); st.rerun()
-        st.write("🗑️ **Hapus User**")
-        if st.button("Hapus User Terpilih", type="primary"):
-            if target_user != st.session_state['username']:
-                delete_user_data(target_user)
-                st.rerun()
-            else: st.error("Tidak bisa hapus akun sendiri.")
+        if udf is not None and not udf.empty:
+            target_user = st.selectbox("Pilih User", udf['username'])
+            with st.form("edit_user"):
+                new_pass = st.text_input("Password Baru (Biarkan kosong jika tetap)", type='password')
+                current_role = udf[udf['username'] == target_user]['role'].values[0]
+                new_role = st.selectbox("Role", ["user", "admin"], index=0 if current_role == 'user' else 1)
+                if st.form_submit_button("Update User"):
+                    update_user(target_user, new_pass, new_role)
+                    st.success("Updated."); st.rerun()
+            st.write("🗑️ **Hapus User**")
+            if st.button("Hapus User Terpilih", type="primary"):
+                if target_user != st.session_state['username']:
+                    delete_user_data(target_user)
+                    st.rerun()
+                else: st.error("Tidak bisa hapus akun sendiri.")
 
 def main():
     st.set_page_config("Resep App", layout="wide")
-    init_db()
+    init_db() # Ini akan otomatis membuat tabel di Supabase saat pertama kali jalan
+    
     if 'logged_in' not in st.session_state:
         st.session_state['logged_in'] = False; st.session_state['role'] = None
     if not st.session_state['logged_in']: login_page()
